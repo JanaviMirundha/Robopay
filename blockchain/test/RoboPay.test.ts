@@ -2,85 +2,283 @@ import { expect } from "chai";
 import { network } from "hardhat";
 
 describe("RoboPay", function () {
-  it("should deploy the RoboPay contract", async function () {
-    const { ethers } = await network.connect();
 
-    const RoboPay = await ethers.getContractFactory("RoboPay");
+    async function deployContract() {
+        const { ethers } = await network.connect();
 
-    const roboPay = await RoboPay.deploy();
+        const [owner, customer, recipient, otherUser] =
+            await ethers.getSigners();
 
-    await roboPay.waitForDeployment();
+        const RoboPay = await ethers.getContractFactory("RoboPay");
 
-    const address = await roboPay.getAddress();
+        const roboPay = await RoboPay.deploy(
+            await recipient.getAddress()
+        );
 
-    expect(address).to.be.properAddress;
-  });
+        await roboPay.waitForDeployment();
 
-  it("should record a verified robot payment", async function () {
-    const { ethers } = await network.connect();
+        return {
+            ethers,
+            roboPay,
+            owner,
+            customer,
+            recipient,
+            otherUser
+        };
+    }
 
-    const RoboPay = await ethers.getContractFactory("RoboPay");
+    it("deploys with the correct owner and payment recipient", async function () {
+        const {
+            roboPay,
+            owner,
+            recipient
+        } = await deployContract();
 
-    const roboPay = await RoboPay.deploy();
+        expect(await roboPay.owner())
+            .to.equal(await owner.getAddress());
 
-    await roboPay.waitForDeployment();
+        expect(await roboPay.paymentRecipient())
+            .to.equal(await recipient.getAddress());
+    });
 
-    const orderId = "RP1001";
-    const robotId = "RF-01";
-    const service = "Human Following";
-    const duration = 30;
-    const amount = 60;
+    it("returns correct INR price for RF-01", async function () {
+        const { roboPay } = await deployContract();
 
-    const paymentHash = ethers.keccak256(
-      ethers.toUtf8Bytes("UPI-RP1001")
-    );
+        expect(
+            await roboPay.requiredAmountInr("RF-01", 10)
+        ).to.equal(20);
 
-    await roboPay.recordPayment(
-      orderId,
-      robotId,
-      service,
-      duration,
-      amount,
-      paymentHash
-    );
+        expect(
+            await roboPay.requiredAmountInr("RF-01", 20)
+        ).to.equal(40);
 
-    const payment = await roboPay.getPayment(orderId);
+        expect(
+            await roboPay.requiredAmountInr("RF-01", 30)
+        ).to.equal(60);
+    });
 
-    expect(payment[0]).to.equal(orderId);
-    expect(payment[1]).to.equal(robotId);
-    expect(payment[2]).to.equal(service);
-    expect(payment[3]).to.equal(duration);
-    expect(payment[4]).to.equal(amount);
-    expect(payment[5]).to.equal(paymentHash);
-    expect(payment[7]).to.equal(true);
-  });
+    it("returns correct ETH price for RF-01", async function () {
+        const { roboPay, ethers } = await deployContract();
 
-  it("should prevent another wallet from recording a payment", async function () {
-    const { ethers } = await network.connect();
+        expect(
+            await roboPay.requiredPayment("RF-01", 10)
+        ).to.equal(
+            ethers.parseEther("0.00001")
+        );
 
-    const [owner, otherUser] = await ethers.getSigners();
+        expect(
+            await roboPay.requiredPayment("RF-01", 20)
+        ).to.equal(
+            ethers.parseEther("0.00002")
+        );
 
-    const RoboPay = await ethers.getContractFactory("RoboPay");
+        expect(
+            await roboPay.requiredPayment("RF-01", 30)
+        ).to.equal(
+            ethers.parseEther("0.00003")
+        );
+    });
 
-    const roboPay = await RoboPay.deploy();
+    it("creates rental with correct payment and forwards payment", async function () {
+        const {
+            roboPay,
+            customer,
+            recipient,
+            ethers
+        } = await deployContract();
 
-    await roboPay.waitForDeployment();
+        const orderId = "ORDER-001";
+        const robotId = "RF-01";
+        const service = "Human Following Robot";
+        const durationMinutes = 10;
+        const amountInr = 20;
 
-    const paymentHash = ethers.keccak256(
-      ethers.toUtf8Bytes("UPI-RP1002")
-    );
+        const payment = await roboPay.requiredPayment(
+            robotId,
+            durationMinutes
+        );
 
-    await expect(
-      roboPay
-        .connect(otherUser)
-        .recordPayment(
-          "RP1002",
-          "FC-01",
-          "Floor Cleaning",
-          10,
-          20,
-          paymentHash
-        )
-    ).to.be.revertedWith("Only owner can perform this action");
-  });
+        const recipientBefore =
+            await ethers.provider.getBalance(
+                await recipient.getAddress()
+            );
+
+        await roboPay.connect(customer).rentRobot(
+            orderId,
+            robotId,
+            service,
+            durationMinutes,
+            amountInr,
+            {
+                value: payment
+            }
+        );
+
+        const recipientAfter =
+            await ethers.provider.getBalance(
+                await recipient.getAddress()
+            );
+
+        // Customer payment must reach the admin/payment recipient.
+        expect(recipientAfter)
+            .to.equal(recipientBefore + payment);
+
+        // Payment must not remain inside the contract.
+        expect(
+            await roboPay.contractBalance()
+        ).to.equal(0);
+    });
+
+    it("rejects incorrect ETH payment", async function () {
+        const {
+            roboPay,
+            customer,
+            ethers
+        } = await deployContract();
+
+        const correctPayment =
+            await roboPay.requiredPayment("RF-01", 10);
+
+        const wrongPayment =
+            correctPayment +
+            ethers.parseEther("0.00001");
+
+        await expect(
+            roboPay.connect(customer).rentRobot(
+                "ORDER-002",
+                "RF-01",
+                "Human Following Robot",
+                10,
+                20,
+                {
+                    value: wrongPayment
+                }
+            )
+        ).to.be.revert(ethers);
+    });
+
+    it("rejects incorrect INR package amount", async function () {
+        const {
+            roboPay,
+            customer,
+            ethers
+        } = await deployContract();
+
+        const payment =
+            await roboPay.requiredPayment("RF-01", 10);
+
+        await expect(
+            roboPay.connect(customer).rentRobot(
+                "ORDER-003",
+                "RF-01",
+                "Human Following Robot",
+                10,
+                40,
+                {
+                    value: payment
+                }
+            )
+        ).to.be.revert(ethers);
+    });
+
+    it("rejects invalid robot or package", async function () {
+        const {
+            roboPay,
+            ethers
+        } = await deployContract();
+
+        await expect(
+            roboPay.requiredPayment(
+                "INVALID",
+                10
+            )
+        ).to.be.revert(ethers);
+    });
+
+    it("rejects duplicate orders", async function () {
+        const {
+            roboPay,
+            customer,
+            ethers
+        } = await deployContract();
+
+        const payment =
+            await roboPay.requiredPayment("RF-01", 10);
+
+        await roboPay.connect(customer).rentRobot(
+            "ORDER-004",
+            "RF-01",
+            "Human Following Robot",
+            10,
+            20,
+            {
+                value: payment
+            }
+        );
+
+        await expect(
+            roboPay.connect(customer).rentRobot(
+                "ORDER-004",
+                "RF-01",
+                "Human Following Robot",
+                10,
+                20,
+                {
+                    value: payment
+                }
+            )
+        ).to.be.revert(ethers);
+    });
+
+    it("allows owner to end rental", async function () {
+        const {
+            roboPay,
+            owner,
+            customer
+        } = await deployContract();
+
+        const payment =
+            await roboPay.requiredPayment("RF-01", 10);
+
+        await roboPay.connect(customer).rentRobot(
+            "ORDER-005",
+            "RF-01",
+            "Human Following Robot",
+            10,
+            20,
+            {
+                value: payment
+            }
+        );
+
+        // Owner should be able to end the rental without reverting.
+        await roboPay.connect(owner).endRental("ORDER-005");
+    });
+
+    it("rejects non-owner from ending rental", async function () {
+        const {
+            roboPay,
+            customer,
+            otherUser,
+            ethers
+        } = await deployContract();
+
+        const payment =
+            await roboPay.requiredPayment("RF-01", 10);
+
+        await roboPay.connect(customer).rentRobot(
+            "ORDER-006",
+            "RF-01",
+            "Human Following Robot",
+            10,
+            20,
+            {
+                value: payment
+            }
+        );
+
+        await expect(
+            roboPay.connect(otherUser).endRental("ORDER-006")
+        ).to.be.revert(ethers);
+    });
 });
