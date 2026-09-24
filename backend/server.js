@@ -16,17 +16,18 @@ const RPC_URL =
     process.env.RPC_URL ||
     "https://sepolia.base.org";
 
-let rawContractAddress = (process.env.CONTRACT_ADDRESS || "0x05e5c2BD9D9383217C8f54BBdd0D3A6a05457959").trim();
+let rawContractAddress = (process.env.CONTRACT_ADDRESS || "0xD9D65F1743b523A8e5CC0CDB1896413a116574E9").trim();
 if (!ethers.isAddress(rawContractAddress)) {
     const cleanHex = rawContractAddress.replace(/[^0-9a-fA-F]/g, "").slice(0, 40);
     rawContractAddress = "0x" + cleanHex;
 }
 const CONTRACT_ADDRESS = ethers.isAddress(rawContractAddress)
     ? rawContractAddress
-    : "0x05e5c2BD9D9383217C8f54BBdd0D3A6a05457959";
+    : "0xD9D65F1743b523A8e5CC0CDB1896413a116574E9";
 
 const KNOWN_CONTRACT_ADDRESSES = [
     CONTRACT_ADDRESS.toLowerCase(),
+    "0xd9d65f1743b523a8e5cc0cdb1896413a116574e9",
     "0x05e5c2bd9d9383217c8f54bbdd0d3a6a05457959",
     "0xded19ce7998fb86a76c7f48df66a2a3c2425a028"
 ];
