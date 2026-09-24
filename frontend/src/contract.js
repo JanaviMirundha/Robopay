@@ -208,6 +208,118 @@ export const ROBO_PAY_ABI = [
     },
 
     {
+        inputs: [
+            {
+                internalType: "string",
+                name: "orderId",
+                type: "string"
+            }
+        ],
+        name: "refundRental",
+        outputs: [],
+        stateMutability: "nonpayable",
+        type: "function"
+    },
+
+    {
+        inputs: [
+            {
+                internalType: "string",
+                name: "orderId",
+                type: "string"
+            }
+        ],
+        name: "completeRentalAndRelease",
+        outputs: [],
+        stateMutability: "nonpayable",
+        type: "function"
+    },
+
+    {
+        inputs: [
+            {
+                internalType: "address",
+                name: "customer",
+                type: "address"
+            }
+        ],
+        name: "getCustomerOrders",
+        outputs: [
+            {
+                internalType: "string[]",
+                name: "",
+                type: "string[]"
+            }
+        ],
+        stateMutability: "view",
+        type: "function"
+    },
+
+    {
+        anonymous: false,
+        inputs: [
+            {
+                indexed: true,
+                internalType: "string",
+                name: "orderId",
+                type: "string"
+            },
+            {
+                indexed: true,
+                internalType: "address",
+                name: "customer",
+                type: "address"
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "amountRefunded",
+                type: "uint256"
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "timestamp",
+                type: "uint256"
+            }
+        ],
+        name: "RentalRefunded",
+        type: "event"
+    },
+
+    {
+        anonymous: false,
+        inputs: [
+            {
+                indexed: true,
+                internalType: "string",
+                name: "orderId",
+                type: "string"
+            },
+            {
+                indexed: true,
+                internalType: "address",
+                name: "recipient",
+                type: "address"
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "amountReleased",
+                type: "uint256"
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "timestamp",
+                type: "uint256"
+            }
+        ],
+        name: "EscrowReleased",
+        type: "event"
+    },
+
+    {
         inputs: [],
         name: "contractBalance",
         outputs: [

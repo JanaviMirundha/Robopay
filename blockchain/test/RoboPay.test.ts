@@ -79,11 +79,10 @@ describe("RoboPay", function () {
         );
     });
 
-    it("creates rental with correct payment and forwards payment", async function () {
+    it("creates rental with correct payment and holds funds in escrow", async function () {
         const {
             roboPay,
             customer,
-            recipient,
             ethers
         } = await deployContract();
 
@@ -98,11 +97,6 @@ describe("RoboPay", function () {
             durationMinutes
         );
 
-        const recipientBefore =
-            await ethers.provider.getBalance(
-                await recipient.getAddress()
-            );
-
         await roboPay.connect(customer).rentRobot(
             orderId,
             robotId,
@@ -114,19 +108,78 @@ describe("RoboPay", function () {
             }
         );
 
-        const recipientAfter =
-            await ethers.provider.getBalance(
-                await recipient.getAddress()
-            );
+        // Funds are safely held in contract escrow
+        expect(await roboPay.contractBalance()).to.equal(payment);
 
-        // Customer payment must reach the admin/payment recipient.
-        expect(recipientAfter)
-            .to.equal(recipientBefore + payment);
+        const rental = await roboPay.getRental(orderId);
+        expect(rental[0]).to.equal(orderId);
+        expect(rental[8]).to.equal(true); // active
 
-        // Payment must not remain inside the contract.
-        expect(
-            await roboPay.contractBalance()
-        ).to.equal(0);
+        // Customer orders mapping
+        const orders = await roboPay.getCustomerOrders(await customer.getAddress());
+        expect(orders).to.include(orderId);
+    });
+
+    it("allows customer to claim refund from escrow", async function () {
+        const {
+            roboPay,
+            customer,
+            ethers
+        } = await deployContract();
+
+        const orderId = "ORDER-REFUND";
+        const payment = await roboPay.requiredPayment("RF-01", 10);
+
+        await roboPay.connect(customer).rentRobot(
+            orderId,
+            "RF-01",
+            "Human Following",
+            10,
+            20,
+            { value: payment }
+        );
+
+        const balanceBefore = await ethers.provider.getBalance(await customer.getAddress());
+
+        const tx = await roboPay.connect(customer).refundRental(orderId);
+        const receipt = await tx.wait();
+        const gasUsed = receipt.gasUsed * receipt.gasPrice;
+
+        const balanceAfter = await ethers.provider.getBalance(await customer.getAddress());
+
+        // Balance should increase by payment minus gas
+        expect(balanceAfter).to.be.closeTo(balanceBefore + payment - gasUsed, ethers.parseEther("0.0001"));
+        expect(await roboPay.contractBalance()).to.equal(0);
+    });
+
+    it("releases escrow to recipient upon completion", async function () {
+        const {
+            roboPay,
+            customer,
+            owner,
+            recipient,
+            ethers
+        } = await deployContract();
+
+        const orderId = "ORDER-COMPLETE";
+        const payment = await roboPay.requiredPayment("RF-01", 10);
+
+        await roboPay.connect(customer).rentRobot(
+            orderId,
+            "RF-01",
+            "Human Following",
+            10,
+            20,
+            { value: payment }
+        );
+
+        const recipientBefore = await ethers.provider.getBalance(await recipient.getAddress());
+
+        await roboPay.connect(owner).endRental(orderId);
+
+        const recipientAfter = await ethers.provider.getBalance(await recipient.getAddress());
+        expect(recipientAfter).to.equal(recipientBefore + payment);
+        expect(await roboPay.contractBalance()).to.equal(0);
     });
 
     it("rejects incorrect ETH payment", async function () {

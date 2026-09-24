@@ -179,3 +179,58 @@ export async function payForRental({
             requiredPayment.toString(),
     };
 }
+
+export async function refundRentalOnChain(orderId) {
+    if (!orderId) {
+        throw new Error("Order ID is missing.");
+    }
+
+    const { signer } = await connectMetaMask();
+    if (!signer) {
+        throw new Error("MetaMask signer could not be obtained.");
+    }
+
+    const contract = new ethers.Contract(
+        ROBO_PAY_CONTRACT,
+        ROBO_PAY_ABI,
+        signer
+    );
+
+    const transaction = await contract.refundRental(orderId);
+    console.log("RoboPay refund transaction submitted:", transaction.hash);
+
+    const receipt = await transaction.wait();
+    if (!receipt || receipt.status !== 1) {
+        throw new Error("Refund transaction failed on blockchain.");
+    }
+
+    return {
+        success: true,
+        transactionHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+    };
+}
+
+export async function completeRentalOnChain(orderId) {
+    if (!orderId) {
+        throw new Error("Order ID is missing.");
+    }
+
+    const { signer } = await connectMetaMask();
+    if (!signer) {
+        throw new Error("MetaMask signer could not be obtained.");
+    }
+
+    const contract = new ethers.Contract(
+        ROBO_PAY_CONTRACT,
+        ROBO_PAY_ABI,
+        signer
+    );
+
+    const transaction = await contract.completeRentalAndRelease(orderId);
+    const receipt = await transaction.wait();
+    return {
+        success: true,
+        transactionHash: receipt.hash,
+    };
+}

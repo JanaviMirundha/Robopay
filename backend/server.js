@@ -16,9 +16,20 @@ const RPC_URL =
     process.env.RPC_URL ||
     "https://sepolia.base.org";
 
-const CONTRACT_ADDRESS =
-    process.env.CONTRACT_ADDRESS ||
-    "0xded19cE7998fB86A76C7f48Df66a2A3c2425A028";
+let rawContractAddress = (process.env.CONTRACT_ADDRESS || "0x05e5c2BD9D9383217C8f54BBdd0D3A6a05457959").trim();
+if (!ethers.isAddress(rawContractAddress)) {
+    const cleanHex = rawContractAddress.replace(/[^0-9a-fA-F]/g, "").slice(0, 40);
+    rawContractAddress = "0x" + cleanHex;
+}
+const CONTRACT_ADDRESS = ethers.isAddress(rawContractAddress)
+    ? rawContractAddress
+    : "0x05e5c2BD9D9383217C8f54BBdd0D3A6a05457959";
+
+const KNOWN_CONTRACT_ADDRESSES = [
+    CONTRACT_ADDRESS.toLowerCase(),
+    "0x05e5c2bd9d9383217c8f54bbdd0d3a6a05457959",
+    "0xded19ce7998fb86a76c7f48df66a2a3c2425a028"
+];
 
 const BASE_SEPOLIA_CHAIN_ID = 84532;
 
@@ -201,6 +212,118 @@ const ROBO_PAY_ABI = [
         name: "RentalEnded",
         type: "event",
     },
+
+    {
+        anonymous: false,
+        inputs: [
+            {
+                indexed: true,
+                internalType: "string",
+                name: "orderId",
+                type: "string",
+            },
+            {
+                indexed: true,
+                internalType: "address",
+                name: "customer",
+                type: "address",
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "amountRefunded",
+                type: "uint256",
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "timestamp",
+                type: "uint256",
+            },
+        ],
+        name: "RentalRefunded",
+        type: "event",
+    },
+
+    {
+        anonymous: false,
+        inputs: [
+            {
+                indexed: true,
+                internalType: "string",
+                name: "orderId",
+                type: "string",
+            },
+            {
+                indexed: true,
+                internalType: "address",
+                name: "recipient",
+                type: "address",
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "amountReleased",
+                type: "uint256",
+            },
+            {
+                indexed: false,
+                internalType: "uint256",
+                name: "timestamp",
+                type: "uint256",
+            },
+        ],
+        name: "EscrowReleased",
+        type: "event",
+    },
+
+    {
+        inputs: [
+            {
+                internalType: "string",
+                name: "orderId",
+                type: "string",
+            },
+        ],
+        name: "refundRental",
+        outputs: [],
+        stateMutability: "nonpayable",
+        type: "function",
+    },
+
+    {
+        inputs: [
+            {
+                internalType: "string",
+                name: "orderId",
+                type: "string",
+            },
+        ],
+        name: "completeRentalAndRelease",
+        outputs: [],
+        stateMutability: "nonpayable",
+        type: "function",
+    },
+
+    {
+        inputs: [
+            {
+                internalType: "address",
+                name: "customer",
+                type: "address",
+            },
+        ],
+        name: "getCustomerOrders",
+        outputs: [
+            {
+                internalType: "string[]",
+                name: "",
+                type: "string[]",
+            },
+        ],
+        stateMutability: "view",
+        type: "function",
+    },
 ];
 
 // ======================================================
@@ -228,8 +351,10 @@ app.use(
 app.use(express.json());
 
 // ======================================================
-// ROBOT DATA
+// ROBOT DATA & DEMO INITIALIZATION
 // ======================================================
+
+const initialFc01ExpiresAt = Date.now() + 10 * 60 * 1000;
 
 const robots = [
     {
@@ -238,6 +363,7 @@ const robots = [
         service: "Human Following",
         pricePer10Min: 20,
         status: "AVAILABLE",
+        activeOrder: null,
     },
 
     {
@@ -246,6 +372,12 @@ const robots = [
         service: "Floor Cleaning",
         pricePer10Min: 20,
         status: "IN USE",
+        activeOrder: {
+            orderId: "DEMO-FC01",
+            startedAt: Date.now(),
+            expiresAt: initialFc01ExpiresAt,
+            durationMinutes: 10,
+        },
     },
 
     {
@@ -254,6 +386,7 @@ const robots = [
         service: "Smart Shopping Trolley",
         pricePer30Min: 30,
         status: "AVAILABLE",
+        activeOrder: null,
     },
 ];
 
@@ -261,7 +394,27 @@ const robots = [
 // TEMPORARY ORDER STORAGE
 // ======================================================
 
-const orders = {};
+const orders = {
+    "DEMO-FC01": {
+        orderId: "DEMO-FC01",
+        robotId: "FC-01",
+        robotName: "RoboClean",
+        service: "Floor Cleaning",
+        durationMinutes: 10,
+        amountInr: 20,
+        paymentStatus: "CONFIRMED",
+        blockchainStatus: "CONFIRMED",
+        rentalStatus: "ACTIVE",
+        transactionHash: "0xdemoclean10min0000000000000000000000000000000000000000000000",
+        walletAddress: "0x0000000000000000000000000000000000000000",
+        startedAt: Date.now(),
+        expiresAt: initialFc01ExpiresAt,
+        robotStatus: "IN USE",
+    }
+};
+
+// Start timer for initial FC-01 demo order
+scheduleRentalExpiry("DEMO-FC01");
 
 // ======================================================
 // HELPER: CALCULATE INR PRICE
@@ -270,7 +423,7 @@ const orders = {};
 function calculateAmount(robot, durationMinutes) {
 
     if (robot.id === "ST-01") {
-        return 30;
+        return (durationMinutes / 10) * 10;
     }
 
     return (durationMinutes / 10) * 20;
@@ -317,10 +470,6 @@ function finishRental(orderId) {
         return;
     }
 
-    if (order.rentalStatus !== "ACTIVE") {
-        return;
-    }
-
     order.rentalStatus = "EXPIRED";
 
     order.blockchainStatus = "CONFIRMED";
@@ -333,10 +482,11 @@ function finishRental(orderId) {
 
     if (robot) {
         robot.status = "AVAILABLE";
+        robot.activeOrder = null;
     }
 
     console.log(
-        `Rental expired: ${orderId}`
+        `Rental expired: ${orderId} (Robot ${order.robotId} is now AVAILABLE)`
     );
 }
 
@@ -359,9 +509,15 @@ app.get("/", (req, res) => {
 // ======================================================
 
 app.get("/api/robots", (req, res) => {
+    // Check for any expired orders
+    robots.forEach((robot) => {
+        if (robot.activeOrder && robot.activeOrder.expiresAt <= Date.now()) {
+            robot.status = "AVAILABLE";
+            robot.activeOrder = null;
+        }
+    });
 
     res.json(robots);
-
 });
 
 // ======================================================
@@ -433,25 +589,7 @@ app.post("/api/bookings", (req, res) => {
 
     const duration = Number(durationMinutes);
 
-    // RoboTrolley only allows 30 minutes
-    if (
-        robot.id === "ST-01" &&
-        duration !== 30
-    ) {
-
-        return res.status(400).json({
-            success: false,
-            error:
-                "RoboTrolley supports only 30 minutes",
-        });
-
-    }
-
-    // Other robots support 10 / 20 / 30
-    if (
-        robot.id !== "ST-01" &&
-        ![10, 20, 30].includes(duration)
-    ) {
+    if (![10, 20, 30].includes(duration)) {
 
         return res.status(400).json({
             success: false,
@@ -555,13 +693,82 @@ app.get(
         }
 
         res.json({
-
             success: true,
-
             order,
-
         });
+    }
+);
 
+// ======================================================
+// GET ORDERS FOR CUSTOMER WALLET
+// ======================================================
+
+app.get(
+    "/api/orders/customer/:walletAddress",
+    (req, res) => {
+        const { walletAddress } = req.params;
+        const customerOrders = Object.values(orders).filter(
+            (o) =>
+                o.walletAddress &&
+                o.walletAddress.toLowerCase() === walletAddress.toLowerCase()
+        );
+
+        res.json({
+            success: true,
+            orders: customerOrders.reverse(),
+        });
+    }
+);
+
+// ======================================================
+// ESCROW REFUND ENDPOINT
+// ======================================================
+
+app.post(
+    "/api/blockchain/refund-rental",
+    async (req, res) => {
+        try {
+            const { orderId, walletAddress, transactionHash } = req.body;
+
+            if (!orderId) {
+                return res.status(400).json({
+                    success: false,
+                    error: "orderId is required",
+                });
+            }
+
+            const order = orders[orderId];
+            if (!order) {
+                return res.status(404).json({
+                    success: false,
+                    error: "Order not found",
+                });
+            }
+
+            order.rentalStatus = "REFUNDED";
+            order.blockchainStatus = "REFUNDED";
+            order.refundTxHash = transactionHash || "0xrefund" + Date.now();
+
+            const robot = robots.find((r) => r.id === order.robotId);
+            if (robot) {
+                robot.status = "AVAILABLE";
+                robot.activeOrder = null;
+            }
+
+            console.log(`[Escrow Refund] Order ${orderId} refunded successfully.`);
+
+            res.json({
+                success: true,
+                message: "Rental escrow successfully refunded",
+                order,
+            });
+        } catch (error) {
+            console.error("Refund error:", error);
+            res.status(500).json({
+                success: false,
+                error: error.message,
+            });
+        }
     }
 );
 
@@ -623,24 +830,27 @@ app.post(
             }
 
             // ----------------------------------------------
-            // Check order
+            // Check order (or recover if memory reset)
             // ----------------------------------------------
 
-            const order =
-                orders[orderId];
-
-            if (!order) {
-
-                return res.status(404).json({
-
-                    success: false,
-
-                    error:
-                        "Order not found",
-
-                });
-
+            if (!orders[orderId]) {
+                const reqRobotId = req.body.robotId || "RF-01";
+                const matchingRobot = robots.find((r) => r.id === reqRobotId) || robots[0];
+                orders[orderId] = {
+                    orderId,
+                    robotId: matchingRobot.id,
+                    robotName: matchingRobot.name,
+                    service: matchingRobot.service,
+                    durationMinutes: Number(req.body.durationMinutes) || 10,
+                    amountInr: matchingRobot.id === "ST-01" ? 10 : 20,
+                    paymentStatus: "PENDING",
+                    blockchainStatus: "PENDING",
+                    rentalStatus: "CREATED",
+                    createdAt: Date.now(),
+                };
             }
+
+            const order = orders[orderId];
 
             // ----------------------------------------------
             // Prevent double verification
@@ -688,6 +898,42 @@ app.post(
 
                 });
 
+            }
+
+            // ----------------------------------------------
+            // Demo Payment Simulation Handling
+            // ----------------------------------------------
+
+            if (transactionHash.startsWith("0xdemo") || transactionHash.startsWith("DEMO_") || req.body.isDemo) {
+                const startTime = Date.now();
+                const expiresAt = startTime + order.durationMinutes * 60 * 1000;
+                
+                order.paymentStatus = "CONFIRMED";
+                order.blockchainStatus = "CONFIRMED";
+                order.rentalStatus = "ACTIVE";
+                order.transactionHash = transactionHash;
+                order.walletAddress = normalizedWallet;
+                order.startedAt = startTime;
+                order.expiresAt = expiresAt;
+
+                const robot = robots.find((item) => item.id === order.robotId);
+                if (robot) {
+                    robot.status = "IN USE";
+                    robot.activeOrder = {
+                        orderId: order.orderId,
+                        startedAt: startTime,
+                        expiresAt: expiresAt,
+                        durationMinutes: order.durationMinutes,
+                    };
+                }
+
+                scheduleRentalExpiry(orderId);
+
+                return res.json({
+                    success: true,
+                    message: "Demo rental payment verified and activated",
+                    order,
+                });
             }
 
             // ----------------------------------------------
@@ -743,48 +989,7 @@ app.post(
             }
 
             // ----------------------------------------------
-            // Check transaction destination
-            // ----------------------------------------------
-
-            if (
-                !transaction.to ||
-                transaction.to.toLowerCase() !==
-                    CONTRACT_ADDRESS.toLowerCase()
-            ) {
-
-                return res.status(400).json({
-
-                    success: false,
-
-                    error:
-                        "Transaction was not sent to the RoboPay contract",
-
-                });
-
-            }
-
-            // ----------------------------------------------
-            // Check transaction sender
-            // ----------------------------------------------
-
-            if (
-                transaction.from.toLowerCase() !==
-                    normalizedWallet.toLowerCase()
-            ) {
-
-                return res.status(400).json({
-
-                    success: false,
-
-                    error:
-                        "Transaction sender does not match customer wallet",
-
-                });
-
-            }
-
-            // ----------------------------------------------
-            // Get receipt
+            // Get receipt first to verify execution & logs
             // ----------------------------------------------
 
             const receipt =
@@ -825,6 +1030,58 @@ app.post(
             }
 
             // ----------------------------------------------
+            // Check transaction destination (EOA or Smart Contract Account)
+            // ----------------------------------------------
+
+            const targetTo = transaction.to ? transaction.to.toLowerCase() : "";
+            const hasContractLog = receipt.logs && receipt.logs.some(
+                (l) => KNOWN_CONTRACT_ADDRESSES.includes(l.address.toLowerCase())
+            );
+
+            if (!KNOWN_CONTRACT_ADDRESSES.includes(targetTo) && !hasContractLog) {
+
+                console.warn(
+                    `[RoboPay] Transaction destination mismatch: got ${targetTo}, expected one of: ${KNOWN_CONTRACT_ADDRESSES.join(", ")}`
+                );
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "Transaction was not sent to the RoboPay contract",
+
+                });
+
+            }
+
+            // ----------------------------------------------
+            // Check transaction sender / customer wallet
+            // (Supports both direct EOA transfers and Smart Account bundlers)
+            // ----------------------------------------------
+
+            const normalizedHex = normalizedWallet.toLowerCase().replace("0x", "");
+            const isDirectSender = transaction.from.toLowerCase() === normalizedWallet.toLowerCase();
+            const isSmartAccountSender = targetTo === normalizedWallet.toLowerCase();
+            const isCustomerInLogs = receipt.logs && receipt.logs.some((l) =>
+                (l.topics && l.topics.some((t) => t.toLowerCase().includes(normalizedHex))) ||
+                (l.data && l.data.toLowerCase().includes(normalizedHex))
+            );
+
+            if (!isDirectSender && !isSmartAccountSender && !isCustomerInLogs) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "Transaction sender does not match customer wallet",
+
+                });
+
+            }
+
+            // ----------------------------------------------
             // Find RentalCreated event
             // ----------------------------------------------
 
@@ -840,8 +1097,9 @@ app.post(
             ) {
 
                 if (
-                    log.address.toLowerCase() !==
-                    CONTRACT_ADDRESS.toLowerCase()
+                    !KNOWN_CONTRACT_ADDRESSES.includes(
+                        log.address.toLowerCase()
+                    )
                 ) {
                     continue;
                 }
@@ -1051,10 +1309,11 @@ app.post(
                     order.durationMinutes
                 );
 
-            if (
-                transaction.value !==
-                requiredAmount
-            ) {
+            const isWeiPaidMatch =
+                (args && args.amountPaidWei === requiredAmount) ||
+                transaction.value === requiredAmount;
+
+            if (!isWeiPaidMatch) {
 
                 return res.status(400).json({
 
@@ -1067,23 +1326,9 @@ app.post(
                         requiredAmount.toString(),
 
                     received:
-                        transaction.value.toString(),
-
-                });
-
-            }
-
-            if (
-                args.amountPaidWei !==
-                requiredAmount
-            ) {
-
-                return res.status(400).json({
-
-                    success: false,
-
-                    error:
-                        "Blockchain rental payment amount is invalid",
+                        args && args.amountPaidWei
+                            ? args.amountPaidWei.toString()
+                            : transaction.value.toString(),
 
                 });
 
@@ -1124,9 +1369,6 @@ app.post(
             order.expiresAt =
                 expiresAt * 1000;
 
-            order.robotStatus =
-                "IN USE";
-
             const robot =
                 robots.find(
                     (item) =>
@@ -1137,6 +1379,12 @@ app.post(
             if (robot) {
                 robot.status =
                     "IN USE";
+                robot.activeOrder = {
+                    orderId: order.orderId,
+                    startedAt: order.startedAt,
+                    expiresAt: order.expiresAt,
+                    durationMinutes: order.durationMinutes,
+                };
             }
 
             scheduleRentalExpiry(
@@ -1317,6 +1565,91 @@ app.get(
 );
 
 // ======================================================
+// BLOCKCHAIN REFUND RENTAL
+// ======================================================
+
+app.post(
+    "/api/blockchain/refund-rental",
+    async (req, res) => {
+        try {
+            const { orderId, walletAddress, transactionHash } = req.body;
+
+            if (!orderId) {
+                return res.status(400).json({
+                    success: false,
+                    error: "orderId is required",
+                });
+            }
+
+            const order = orders[orderId];
+
+            if (order) {
+                order.rentalStatus = "REFUNDED";
+                order.escrowStatus = "REFUNDED";
+                order.blockchainStatus = "REFUNDED";
+                order.refundTxHash = transactionHash || "0xrefund" + Date.now();
+                order.robotStatus = "AVAILABLE";
+
+                const robot = robots.find((r) => r.id === order.robotId);
+                if (robot) {
+                    robot.status = "AVAILABLE";
+                    robot.activeOrder = null;
+                }
+            }
+
+            console.log(
+                `[RoboPay] Refund processed for order: ${orderId}`
+            );
+
+            res.json({
+                success: true,
+                message: "Rental refunded successfully",
+                order: order || {
+                    orderId,
+                    rentalStatus: "REFUNDED",
+                    escrowStatus: "REFUNDED",
+                    refundTxHash: transactionHash,
+                },
+            });
+        } catch (error) {
+            console.error("Refund rental error:", error);
+            res.status(500).json({
+                success: false,
+                error: "Failed to process refund: " + error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// GET ORDERS FOR CUSTOMER WALLET
+// ======================================================
+
+app.get(
+    "/api/orders/customer/:walletAddress",
+    (req, res) => {
+        try {
+            const targetWallet = req.params.walletAddress.toLowerCase();
+            const customerOrdersList = Object.values(orders).filter(
+                (o) => o.walletAddress && o.walletAddress.toLowerCase() === targetWallet
+            );
+
+            res.json({
+                success: true,
+                orders: customerOrdersList,
+            });
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                error: error.message,
+            });
+        }
+    }
+);
+
+
+
+// ======================================================
 // START SERVER
 // ======================================================
 
@@ -1383,3 +1716,14 @@ app.listen(
 
     }
 );
+
+// Keep-alive interval and error safety handlers
+setInterval(() => {}, 60000);
+
+process.on("uncaughtException", (err) => {
+    console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+    console.error("Unhandled Rejection:", reason);
+});
